@@ -1,0 +1,42 @@
+import { RoundDurationMinutes } from "./types";
+export type BotConfig = {
+    symbol: string;
+    testMode: boolean;
+    chunksSize: number;
+    startShares: number;
+    priceBuffer: number;
+    sharesLimit: number;
+    minAssetCost: number;
+    maxTotalSpent?: number;
+    roundDurationMinutes: RoundDurationMinutes;
+};
+export declare class Trader {
+    private readonly oppositeMutex;
+    private readonly clobApiClient;
+    private readonly gammaApiClient;
+    private executor;
+    private accumulator;
+    private readonly symbol;
+    private readonly testMode;
+    private readonly chunksSize;
+    private readonly priceBuffer;
+    private readonly startShares;
+    private readonly sharesLimit;
+    private readonly minAssetCost;
+    private readonly maxTotalSpent;
+    private readonly roundDurationMinutes;
+    private slug;
+    private feeRate;
+    private upTokenId;
+    private downTokenId;
+    private conditionId;
+    private roundStartMs;
+    private readonly marketClobWsClient;
+    constructor(config: BotConfig);
+    private handleMarketClobWsEvent;
+    private getSecondsLeft;
+    private getPtbdp;
+    private handleBookEvent;
+    private trade;
+    start(): Promise<void>;
+}
