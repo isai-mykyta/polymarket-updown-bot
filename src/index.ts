@@ -10,7 +10,7 @@ import path from "path";
 import { AssetType, RoundDurationMinutes, state } from "./trader";
 import { logger } from "./services";
 import { BinanceWsClient , BinanceApiClient } from "./binance/";
-import { getTimeRange, TwapCalculator } from "./utils";
+import { getTimeRange } from "./utils";
 import { GammaApiClient } from "./gamma";
 import { MarketClobWsClient } from "./clob";
 import { StatisticsService } from "./services/statistics";
@@ -26,11 +26,8 @@ const validSymbols = ["btc", "eth", "sol", "xrp"];
 if (!SYMBOL || !validSymbols.includes(SYMBOL)) throw new Error("Symbol is not provided or invalid.");
 if (!ROUND_DURATION || !validDurations.includes(ROUND_DURATION)) throw new Error("Round duration is not provided or invalid.");
 
-const TWAP_WINDOW_MS = 60_000;
-
 const gammaApiClient = new GammaApiClient();
 const binanceApiClient = new BinanceApiClient({ baseUrl: "https://api.binance.com" });
-const twapCalculator = new TwapCalculator(TWAP_WINDOW_MS);
 
 const mapSymbolToBinancePair = (symbol: string): string => {
   if (symbol.toLocaleLowerCase() === "btc") return "btcusdt";
@@ -65,12 +62,8 @@ const handleMarketClobWsEvent = async (data: any): Promise<void> => {
 
 const handlePriceTicker = async (msg: any): Promise<void> => {
   if (!msg || !msg.e || msg.e !== "aggTrade") return;
-
   const price = Number(msg.p);
-  const tradeTimeMs = Number(msg.T) || Date.now();
-
-  twapCalculator.addTick(price, tradeTimeMs);
-  state.currentPrice = twapCalculator.getTwap(tradeTimeMs) ?? price;
+  state.currentPrice = price;
 };
 
 const handleBookEvent = async (data: any): Promise<void> => {
