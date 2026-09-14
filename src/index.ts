@@ -7,13 +7,14 @@ dotenv.config();
 import { schedule } from "node-cron";
 import path from "path";
 
-import { AssetType, RoundDurationMinutes, state } from "./trader";
+import { AssetType, Executor, RoundDurationMinutes, state } from "./trader";
 import { logger } from "./services";
 import { BinanceWsClient , BinanceApiClient } from "./binance/";
-import { getTimeRange } from "./utils";
+import { getTimeRange, Mutex } from "./utils";
 import { GammaApiClient } from "./gamma";
-import { MarketClobWsClient } from "./clob";
+import { ClobApiClient, MarketClobWsClient } from "./clob";
 import { StatisticsService } from "./services/statistics";
+import { Accumulator } from "./trader/accumulator";
 
 const SYMBOL = process.env.SYMBOL;
 const TEST_MODE = process.env.TEST_MODE === "true";
@@ -26,6 +27,8 @@ const validSymbols = ["btc", "eth", "sol", "xrp"];
 if (!SYMBOL || !validSymbols.includes(SYMBOL)) throw new Error("Symbol is not provided or invalid.");
 if (!ROUND_DURATION || !validDurations.includes(ROUND_DURATION)) throw new Error("Round duration is not provided or invalid.");
 
+const mutex = new Mutex();
+const clobApiClient = new ClobApiClient();
 const gammaApiClient = new GammaApiClient();
 const binanceApiClient = new BinanceApiClient({ baseUrl: "https://api.binance.com" });
 
@@ -148,6 +151,8 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
   const currentSecondStart = Math.floor(now / 1000) * 1000;
   const previousSecondStart = currentSecondStart - 1000;
 
+  await clobApiClient.getPolymarketClient();
+
   const [kline] = await binanceApiClient.getKlines({
     symbol: mapSymbolToBinancePair(SYMBOL).toLocaleUpperCase(),
     interval: "1s",
@@ -182,6 +187,21 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
   await marketClobWsClient.connect();
   marketClobWsClient.subscribe({ assets_ids: [upTokenId, downTokenId] });
 
+  const executor = new Executor({
+    priceBuffer: 1.02,
+    downTokenId,
+    upTokenId,
+    testMode: TEST_MODE,
+    feeRate: market.feeSchedule.rate
+  }, clobApiClient);
+
+  const accumulator = new Accumulator({
+    chunksSize: 20,
+    startShares: 5,
+    sharesLimit: 150,
+    minAssetCost: 1.5
+  }, executor);
+
   state.started = true;
 
   intervalId = setInterval(() => {
@@ -193,26 +213,38 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
     const upAksPrice = state.upAskPrice;
     const downAskPrice = state.downAskPrice;
 
+    const upQty = state.upQty;
+    const downQty = state.downQty;
+
+    const upAvg = state.upAvgPrice;
+    const downAvg = state.downAvgPrice;
+
+    const lastUpPrice = state.lastUpBuyPrice;
+    const lastDownPrice = state.lastDownBuyPrice;
+
+    const spent = state.totalSpent;
+    const pairCost = state.getPairCost();
+    const finishPayout = state.getFinishPayout();
+
     if (!upAksPrice) return;
     if (!downAskPrice) return;
 
-    const priceToBeatDelta = Math.abs(priceToBeat - currentPrice);
-    const ptbdp = (priceToBeatDelta / priceToBeat) * 100;
-
-    logger.info(`${`UP`.padEnd(4, " ")}: ask - ${upAksPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, ptbdp - ${ptbdp.toFixed(3)}`);
-    logger.info(`${`DOWN`.padEnd(4, " ")}: ask - ${downAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, ptbdp - ${ptbdp.toFixed(3)}`);
+    logger.info(`${`UP`.padEnd(4, " ")}: ask - ${upAksPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${upQty.toFixed(2)}, avg - ${upAvg.toFixed(2)}, lastBuy - ${lastUpPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
+    logger.info(`${`DOWN`.padEnd(4, " ")}: ask - ${downAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${downQty.toFixed(2)}, avg - ${downAvg.toFixed(2)}, lastBuy - ${lastDownPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
 
     const leader = currentPrice >= priceToBeat ? AssetType.UP : AssetType.DOWN;
 
     if (leader === AssetType.UP && upAksPrice <= 0.45) {
-      logger.warn("═══════════════════════════════════════════════════════════");
-      logger.warn(`UP ASK - ${upAksPrice.toFixed(2)}, current price - ${currentPrice.toFixed(0)}`);
-      logger.warn("═══════════════════════════════════════════════════════════");
+      // logger.warn("═══════════════════════════════════════════════════════════");
+      // logger.warn(`UP ASK - ${upAksPrice.toFixed(2)}, current price - ${currentPrice.toFixed(0)}`);
+      // logger.warn("═══════════════════════════════════════════════════════════");
+      accumulator.accumulateAsset(mutex, AssetType.UP);
     }
     if (leader === AssetType.DOWN && downAskPrice <= 0.45) {
-      logger.warn("═══════════════════════════════════════════════════════════");
-      logger.warn(`DOWN ASK - ${downAskPrice.toFixed(2)}, current price - ${currentPrice.toFixed(0)}`);
-      logger.warn("═══════════════════════════════════════════════════════════");
+      // logger.warn("═══════════════════════════════════════════════════════════");
+      // logger.warn(`DOWN ASK - ${downAskPrice.toFixed(2)}, current price - ${currentPrice.toFixed(0)}`);
+      // logger.warn("═══════════════════════════════════════════════════════════");
+      accumulator.accumulateAsset(mutex, AssetType.DOWN);
     }
   }, DATA_INTERVAL_MS);
 });
