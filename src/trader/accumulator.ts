@@ -41,13 +41,13 @@ export class Accumulator {
 
     const lastBuyDelta = Math.abs(askPrice - lastBuyPrice);
 
-    if (lastBuyDelta <= 0.02) return;
+    if (lastBuyDelta <= 0.04) return;
 
     let shares = 0;
 
-    if (askPrice <= 0.30) shares = this.startShares + (qty * 0.05);
-    if (askPrice <= 0.25) shares = this.startShares + (qty * 0.15);
-    if (askPrice <= 0.20) shares = this.startShares + (qty * 0.25);
+    if (askPrice <= 0.30) shares = this.startShares + (qty * 0.03);
+    if (askPrice <= 0.25) shares = this.startShares + (qty * 0.10);
+    if (askPrice <= 0.20) shares = this.startShares + (qty * 0.15);
 
     const executionPrice = this.executor.getExecutionPrice(askPrice);
     const limitAdjustedShares = Math.min(shares, this.sharesLimit);

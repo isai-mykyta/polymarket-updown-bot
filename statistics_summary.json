@@ -1,26 +1,26 @@
 {
-  "totalRounds": 2,
-  "wins": 1,
+  "totalRounds": 1,
+  "wins": 0,
   "losses": 0,
-  "winRate": 0.5,
-  "totalPayout": 3.4,
-  "avgPayout": 1.7,
-  "updatedAt": "2026-09-14T16:55:00.016Z",
-  "maxWin": 3.4,
+  "winRate": 0,
+  "totalPayout": 0,
+  "avgPayout": 0,
+  "updatedAt": "2026-10-03T17:20:00.007Z",
+  "maxWin": 0,
   "maxLoss": 0,
-  "maxSpentPerRound": 1.6,
+  "maxSpentPerRound": 0,
   "bySymbol": {
     "btc": {
-      "totalRounds": 2,
-      "wins": 1,
+      "totalRounds": 1,
+      "wins": 0,
       "losses": 0,
-      "winRate": 0.5,
-      "totalPayout": 3.4,
-      "avgPayout": 1.7,
-      "updatedAt": "2026-09-14T16:55:00.014Z",
-      "maxWin": 3.4,
+      "winRate": 0,
+      "totalPayout": 0,
+      "avgPayout": 0,
+      "updatedAt": "2026-10-03T17:20:00.004Z",
+      "maxWin": 0,
       "maxLoss": 0,
-      "maxSpentPerRound": 1.6
+      "maxSpentPerRound": 0
     }
   }
 }

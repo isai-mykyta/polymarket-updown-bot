@@ -9,7 +9,7 @@ import path from "path";
 
 import { AssetType, Executor, RoundDurationMinutes, state } from "./trader";
 import { logger } from "./services";
-import { BinanceWsClient , BinanceApiClient } from "./binance/";
+import { CoinbaseWsClient , CoinbaseApiClient, CoinbaseCandleRaw } from "./coinbase";
 import { getTimeRange, Mutex } from "./utils";
 import { GammaApiClient } from "./gamma";
 import { ClobApiClient, MarketClobWsClient } from "./clob";
@@ -30,18 +30,19 @@ if (!ROUND_DURATION || !validDurations.includes(ROUND_DURATION)) throw new Error
 const mutex = new Mutex();
 const clobApiClient = new ClobApiClient();
 const gammaApiClient = new GammaApiClient();
-const binanceApiClient = new BinanceApiClient({ baseUrl: "https://api.binance.com" });
+const coinbaseApiClient = new CoinbaseApiClient();
 
-const mapSymbolToBinancePair = (symbol: string): string => {
-  if (symbol.toLocaleLowerCase() === "btc") return "btcusdt";
-  if (symbol.toLocaleLowerCase() === "eth") return "ethusdt";
-  if (symbol.toLocaleLowerCase() === "sol") return "solusdt";
-  if (symbol.toLocaleLowerCase() === "xrp") return "xrpusdt";
+const mapSymbolToCoinbaseProduct = (symbol: string): string => {
+  if (symbol.toLocaleLowerCase() === "btc") return "BTC-USD";
+  if (symbol.toLocaleLowerCase() === "eth") return "ETH-USD";
+  if (symbol.toLocaleLowerCase() === "sol") return "SOL-USD";
+  if (symbol.toLocaleLowerCase() === "xrp") return "XRP-USD";
 };
 
-const binanceWsClient = new BinanceWsClient({
-  symbol: mapSymbolToBinancePair(SYMBOL),
-  onConnect: () => handleBinanceConnection(),
+const PRODUCT_ID = mapSymbolToCoinbaseProduct(SYMBOL);
+
+const coinbaseWsClient = new CoinbaseWsClient({
+  onConnect: () => handleCoinbaseConnection(),
   onMessage: (msg) => void handlePriceTicker(msg),
 });
 
@@ -55,8 +56,10 @@ const statisticsService = new StatisticsService({
   fileName: "statistics_summary.json"
 });
 
-const handleBinanceConnection = (): void => {
-  logger.info(`WebSocket Binance client connected.`);
+const handleCoinbaseConnection = (): void => {
+  logger.info(`WebSocket Coinbase client connected.`);
+  // subscribe on every (re)connect - Coinbase closes sockets that don't subscribe within ~5s
+  coinbaseWsClient.subscribe({ product_ids: [PRODUCT_ID], channels: ["ticker"] });
 };
 
 const handleMarketClobWsEvent = async (data: any): Promise<void> => {
@@ -64,8 +67,16 @@ const handleMarketClobWsEvent = async (data: any): Promise<void> => {
 };
 
 const handlePriceTicker = async (msg: any): Promise<void> => {
-  if (!msg || !msg.e || msg.e !== "aggTrade") return;
-  const price = Number(msg.p);
+  if (msg?.type === "error") {
+    logger.warn(`Coinbase WS error: ${msg.message} ${msg.reason ?? ""}`);
+    return;
+  }
+
+  if (msg?.type !== "ticker" || msg.product_id !== PRODUCT_ID) return;
+
+  const price = Number(msg.price);
+  if (!Number.isFinite(price)) return;
+
   state.currentPrice = price;
 };
 
@@ -106,34 +117,37 @@ const handleBookEvent = async (data: any): Promise<void> => {
   state.leader = state.upAskPrice > state.downAskPrice ? AssetType.UP : AssetType.DOWN;
 };
 
+const captureRound = (): void => {
+  statisticsService.captureRound(
+    SYMBOL,
+    state.slug,
+    {
+      symbol: SYMBOL,
+      priceToBeat: state.priceToBeat,
+      finalPrice: state.currentPrice,
+      winner: state.leader,
+      won: state.getFinishPayout() > 0,
+      actualPayout: Number(state.getFinishPayout().toFixed(2)),
+      upQty: Number(state.upQty.toFixed(2)),
+      downQty: Number(state.downQty.toFixed(2)),
+      upAvgPrice: Number(state.upAvgPrice.toFixed(2)),
+      downAvgPrice: Number(state.downAvgPrice.toFixed(2)),
+      totalSpent: Number(state.totalSpent.toFixed(2)),
+      pairCost: Number(state.getPairCost().toFixed(2)),
+      lastUpBuyPrice: Number(state.lastUpBuyPrice.toFixed(2)),
+      lastDownBuyPrice: Number(state.lastDownBuyPrice.toFixed(2)),
+      lastUpBuyTimestamp: state.lastUpBuyTimestamp ? new Date(state.lastUpBuyTimestamp).toISOString() : null,
+      lastDownBuyTimestamp: state.lastDownBuyTimestamp ? new Date(state.lastDownBuyTimestamp).toISOString() : null,
+    }
+  );
+};
+
 let intervalId: NodeJS.Timeout;
 
 schedule(`*/${ROUND_DURATION} * * * *`, async () => {
   if (intervalId) {
     clearInterval(intervalId);
-
-    statisticsService.captureRound(
-      SYMBOL,
-      state.slug,
-      {
-        symbol: SYMBOL,
-        priceToBeat: state.priceToBeat,
-        finalPrice: state.currentPrice,
-        winner: state.leader,
-        won: state.getFinishPayout() > 0,
-        actualPayout: Number(state.getFinishPayout().toFixed(2)),
-        upQty: Number(state.upQty.toFixed(2)),
-        downQty: Number(state.downQty.toFixed(2)),
-        upAvgPrice: Number(state.upAvgPrice.toFixed(2)),
-        downAvgPrice: Number(state.downAvgPrice.toFixed(2)),
-        totalSpent: Number(state.totalSpent.toFixed(2)),
-        pairCost: Number(state.getPairCost().toFixed(2)),
-        lastUpBuyPrice: Number(state.lastUpBuyPrice.toFixed(2)),
-        lastDownBuyPrice: Number(state.lastDownBuyPrice.toFixed(2)),
-        lastUpBuyTimestamp: state.lastUpBuyTimestamp ? new Date(state.lastUpBuyTimestamp).toISOString() : null,
-        lastDownBuyTimestamp: state.lastDownBuyTimestamp ? new Date(state.lastDownBuyTimestamp).toISOString() : null,
-      }
-    );
+    captureRound();
   }
 
   state.reset();
@@ -147,30 +161,42 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
   logger.info(`Symbol: ${SYMBOL}, duration: ${ROUND_DURATION}m`);
   logger.info("═══════════════════════════════════════════════════════════");
 
-  const now = Date.now();
-  const currentSecondStart = Math.floor(now / 1000) * 1000;
-  const previousSecondStart = currentSecondStart - 1000;
+  const { start } = getTimeRange(`${ROUND_DURATION}m`);
 
   await clobApiClient.getPolymarketClient();
 
-  const [kline] = await binanceApiClient.getKlines({
-    symbol: mapSymbolToBinancePair(SYMBOL).toLocaleUpperCase(),
-    interval: "1s",
-    startTime: String(previousSecondStart),
-    endTime: String(currentSecondStart - 1),
-    limit: "1"
-  });
+  // priceToBeat = close of the 1m candle that ends at the round start
+  const roundStartMs = new Date(start).getTime();
+  const candleStartMs = roundStartMs - 60_000;
+  const candleStartSec = candleStartMs / 1000;
+  const candleStart = new Date(candleStartMs).toISOString();
 
-  const [, openPrice] = kline;
-  const priceToBeat = Number(openPrice);
+  let candle: CoinbaseCandleRaw | undefined;
+
+  for (let attempt = 0; attempt < 5 && !candle; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
+    const candles = await coinbaseApiClient.getProductCandles(PRODUCT_ID, candleStart, start);
+    candle = candles.find(([time]) => time === candleStartSec);
+  }
+
+  if (!candle) {
+    logger.warn(`No previous Coinbase candle found for priceToBeat. product: ${PRODUCT_ID}, start: ${candleStart}, end: ${start}`);
+    return;
+  }
+
+  const [, , , , close] = candle;
+  const priceToBeat = Number(close);
+
+  if (!Number.isFinite(priceToBeat)) {
+    logger.warn(`Invalid previous Coinbase candle close for priceToBeat. candle: ${JSON.stringify(candle)}`);
+    return;
+  }
 
   state.testMode = TEST_MODE;
   state.priceToBeat = priceToBeat;
 
-  if (!binanceWsClient.isConnected()) await binanceWsClient.connect();
+  if (!coinbaseWsClient.isConnected()) await coinbaseWsClient.connect();
 
-  const { start } = getTimeRange(`${ROUND_DURATION}m`);
-  const roundStartMs = new Date(start).getTime();
   const unixStartDate = Math.floor(roundStartMs / 1000);
   const slug = `${SYMBOL}-updown-${ROUND_DURATION}m-${unixStartDate}`;
   const markets = await gammaApiClient.getMarkets({ slug: [slug] });
@@ -197,7 +223,7 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
 
   const accumulator = new Accumulator({
     chunksSize: 20,
-    startShares: 5,
+    startShares: 10,
     sharesLimit: 150,
     minAssetCost: 1.5
   }, executor);
@@ -207,44 +233,29 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
   intervalId = setInterval(() => {
     if (!state.started) return;
 
-    const priceToBeat = state.priceToBeat;
-    const currentPrice = state.currentPrice;
-
-    const upAksPrice = state.upAskPrice;
-    const downAskPrice = state.downAskPrice;
-
-    const upQty = state.upQty;
-    const downQty = state.downQty;
-
-    const upAvg = state.upAvgPrice;
-    const downAvg = state.downAvgPrice;
-
-    const lastUpPrice = state.lastUpBuyPrice;
-    const lastDownPrice = state.lastDownBuyPrice;
+    const {
+      priceToBeat,
+      currentPrice,
+      upAskPrice,
+      downAskPrice,
+      upQty,
+      downQty,
+      upAvgPrice,
+      downAvgPrice,
+      lastUpBuyPrice,
+      lastDownBuyPrice
+    } = state;
 
     const spent = state.totalSpent;
     const pairCost = state.getPairCost();
     const finishPayout = state.getFinishPayout();
 
-    if (!upAksPrice) return;
+    if (!upAskPrice) return;
     if (!downAskPrice) return;
 
-    logger.info(`${`UP`.padEnd(4, " ")}: ask - ${upAksPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${upQty.toFixed(2)}, avg - ${upAvg.toFixed(2)}, lastBuy - ${lastUpPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
-    logger.info(`${`DOWN`.padEnd(4, " ")}: ask - ${downAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${downQty.toFixed(2)}, avg - ${downAvg.toFixed(2)}, lastBuy - ${lastDownPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
+    console.log(currentPrice, priceToBeat);
 
-    const leader = currentPrice >= priceToBeat ? AssetType.UP : AssetType.DOWN;
-
-    if (leader === AssetType.UP && upAksPrice <= 0.45) {
-      // logger.warn("═══════════════════════════════════════════════════════════");
-      // logger.warn(`UP ASK - ${upAksPrice.toFixed(2)}, current price - ${currentPrice.toFixed(0)}`);
-      // logger.warn("═══════════════════════════════════════════════════════════");
-      accumulator.accumulateAsset(mutex, AssetType.UP);
-    }
-    if (leader === AssetType.DOWN && downAskPrice <= 0.45) {
-      // logger.warn("═══════════════════════════════════════════════════════════");
-      // logger.warn(`DOWN ASK - ${downAskPrice.toFixed(2)}, current price - ${currentPrice.toFixed(0)}`);
-      // logger.warn("═══════════════════════════════════════════════════════════");
-      accumulator.accumulateAsset(mutex, AssetType.DOWN);
-    }
+    // logger.info(`${`UP`.padEnd(4, " ")}: ask - ${upAksPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${upQty.toFixed(2)}, avg - ${upAvg.toFixed(2)}, lastBuy - ${lastUpPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
+    // logger.info(`${`DOWN`.padEnd(4, " ")}: ask - ${downAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${downQty.toFixed(2)}, avg - ${downAvg.toFixed(2)}, lastBuy - ${lastDownPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
   }, DATA_INTERVAL_MS);
 });

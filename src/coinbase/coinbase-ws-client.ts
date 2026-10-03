@@ -1,23 +1,23 @@
 import { HOSTS } from "../constants";
 import { logger, WsClient } from "../services";
-import { BinanceWsClientOptions } from "./types";
+import { CoinbaseWsClientOptions } from "./types";
 
-export class BinanceWsClient extends WsClient {
+export class CoinbaseWsClient extends WsClient {
   private reconnectInProgress = false;
   private lastReconnectMs = 0;
 
   private readonly reconnectCooldownMs = 10_000;
 
-  constructor (options: BinanceWsClientOptions) {
+  constructor (options: CoinbaseWsClientOptions) {
     super({
-      baseUrl: `${HOSTS.BINANCE_WS_URL}/market/ws/${options.symbol}@aggTrade`,
+      baseUrl: `${HOSTS.COINBASE_WS_CLIENT}`,
       pingIntervalInSeconds: 5,
       onMessage: options.onMessage,
       onConnect: () => this.handleConnect(options),
     });
   }
 
-  private handleConnect(options: Pick<BinanceWsClientOptions, "onConnect">): void {
+  private handleConnect(options: Pick<CoinbaseWsClientOptions, "onConnect">): void {
     options.onConnect?.();
   }
 

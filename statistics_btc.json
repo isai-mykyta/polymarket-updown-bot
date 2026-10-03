@@ -1,8 +1,8 @@
 {
-  "btc-updown-5m-1789404300": {
+  "btc-updown-5m-1791047700": {
     "symbol": "btc",
-    "priceToBeat": 78638,
-    "finalPrice": 78811.5,
+    "priceToBeat": 84871.57,
+    "finalPrice": 84908,
     "winner": "UP",
     "won": false,
     "actualPayout": 0,
@@ -18,33 +18,15 @@
     "lastDownBuyTimestamp": null
   },
   "_summary": {
-    "totalRounds": 2,
-    "wins": 1,
+    "totalRounds": 1,
+    "wins": 0,
     "losses": 0,
-    "winRate": 0.5,
-    "totalPayout": 3.4,
-    "avgPayout": 1.7,
-    "updatedAt": "2026-09-14T16:55:00.014Z",
-    "maxWin": 3.4,
+    "winRate": 0,
+    "totalPayout": 0,
+    "avgPayout": 0,
+    "updatedAt": "2026-10-03T17:20:00.004Z",
+    "maxWin": 0,
     "maxLoss": 0,
-    "maxSpentPerRound": 1.6
-  },
-  "btc-updown-5m-1789404600": {
-    "symbol": "btc",
-    "priceToBeat": 78849.91,
-    "finalPrice": 78793.8,
-    "winner": "DOWN",
-    "won": true,
-    "actualPayout": 3.4,
-    "upQty": 0,
-    "downQty": 5,
-    "upAvgPrice": 0,
-    "downAvgPrice": 0.32,
-    "totalSpent": 1.6,
-    "pairCost": 0.32,
-    "lastUpBuyPrice": 0,
-    "lastDownBuyPrice": 0.31,
-    "lastUpBuyTimestamp": null,
-    "lastDownBuyTimestamp": "2026-09-14T16:51:43.940Z"
+    "maxSpentPerRound": 0
   }
 }
