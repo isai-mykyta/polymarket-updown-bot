@@ -4,6 +4,7 @@ export const HOSTS = {
   CLOB_WS_URL: `wss://ws-subscriptions-clob.polymarket.com/ws`,
   COINBASE_WS_CLIENT: `wss://ws-feed.exchange.coinbase.com`,
   COINBASE_API_CLIENT: `https://api.exchange.coinbase.com`,
+  POLYMARKET_RTDS_WS_CLIENT: `wss://ws-live-data.polymarket.com`,
 };
 
 export const RPC_URL = "https://polygon-rpc.com";

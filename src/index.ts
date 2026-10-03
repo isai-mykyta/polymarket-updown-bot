@@ -9,7 +9,7 @@ import path from "path";
 
 import { AssetType, Executor, RoundDurationMinutes, state } from "./trader";
 import { logger } from "./services";
-import { CoinbaseWsClient , CoinbaseApiClient, CoinbaseCandleRaw } from "./coinbase";
+import { ChainlinkMessage, ChainlinkPricePoint, ChainlinkSymbol, ChainlinkWsClient } from "./chainlink";
 import { getTimeRange, Mutex } from "./utils";
 import { GammaApiClient } from "./gamma";
 import { ClobApiClient, MarketClobWsClient } from "./clob";
@@ -30,20 +30,20 @@ if (!ROUND_DURATION || !validDurations.includes(ROUND_DURATION)) throw new Error
 const mutex = new Mutex();
 const clobApiClient = new ClobApiClient();
 const gammaApiClient = new GammaApiClient();
-const coinbaseApiClient = new CoinbaseApiClient();
 
-const mapSymbolToCoinbaseProduct = (symbol: string): string => {
-  if (symbol.toLocaleLowerCase() === "btc") return "BTC-USD";
-  if (symbol.toLocaleLowerCase() === "eth") return "ETH-USD";
-  if (symbol.toLocaleLowerCase() === "sol") return "SOL-USD";
-  if (symbol.toLocaleLowerCase() === "xrp") return "XRP-USD";
-};
+const CHAINLINK_SYMBOL = `${SYMBOL.toLowerCase()}/usd` as ChainlinkSymbol;
 
-const PRODUCT_ID = mapSymbolToCoinbaseProduct(SYMBOL);
+// how long to keep per-second chainlink prices around for priceToBeat lookups
+const PRICE_HISTORY_MS = 5 * 60_000;
+// how long to wait for the chainlink tick stamped at round start (ticks arrive ~1-2s late)
+const PRICE_TO_BEAT_TIMEOUT_MS = 10_000;
 
-const coinbaseWsClient = new CoinbaseWsClient({
-  onConnect: () => handleCoinbaseConnection(),
-  onMessage: (msg) => void handlePriceTicker(msg),
+// chainlink price by its timestamp (unix ms)
+const priceHistory = new Map<number, number>();
+
+const chainlinkWsClient = new ChainlinkWsClient({
+  onConnect: () => handleChainlinkConnection(),
+  onMessage: (msg) => handlePriceTicker(msg),
 });
 
 const marketClobWsClient = new MarketClobWsClient({
@@ -56,28 +56,74 @@ const statisticsService = new StatisticsService({
   fileName: "statistics_summary.json"
 });
 
-const handleCoinbaseConnection = (): void => {
-  logger.info(`WebSocket Coinbase client connected.`);
-  // subscribe on every (re)connect - Coinbase closes sockets that don't subscribe within ~5s
-  coinbaseWsClient.subscribe({ product_ids: [PRODUCT_ID], channels: ["ticker"] });
+const handleChainlinkConnection = (): void => {
+  logger.info(`WebSocket Chainlink client connected.`);
+  // subscribe on every (re)connect - the server sends a ~60s history snapshot, which backfills gaps
+  chainlinkWsClient.subscribe([CHAINLINK_SYMBOL]);
 };
 
 const handleMarketClobWsEvent = async (data: any): Promise<void> => {
   if (data.event_type === "book") await handleBookEvent(data);
 };
 
-const handlePriceTicker = async (msg: any): Promise<void> => {
-  if (msg?.type === "error") {
-    logger.warn(`Coinbase WS error: ${msg.message} ${msg.reason ?? ""}`);
+const storePricePoint = ({ timestamp, value }: ChainlinkPricePoint): void => {
+  if (!Number.isFinite(timestamp) || !Number.isFinite(value)) return;
+  priceHistory.set(timestamp, value);
+};
+
+const prunePriceHistory = (): void => {
+  const minTimestamp = Date.now() - PRICE_HISTORY_MS;
+  for (const timestamp of priceHistory.keys()) {
+    if (timestamp < minTimestamp) priceHistory.delete(timestamp);
+  }
+};
+
+const handlePriceTicker = (msg: ChainlinkMessage): void => {
+  if (ChainlinkWsClient.isSnapshot(msg)) {
+    if (msg.payload.symbol !== CHAINLINK_SYMBOL) return;
+    msg.payload.data.forEach(storePricePoint);
+    prunePriceHistory();
     return;
   }
 
-  if (msg?.type !== "ticker" || msg.product_id !== PRODUCT_ID) return;
+  if (!ChainlinkWsClient.isUpdate(msg) || msg.payload.symbol !== CHAINLINK_SYMBOL) return;
 
-  const price = Number(msg.price);
-  if (!Number.isFinite(price)) return;
+  const { timestamp, value } = msg.payload;
+  if (!Number.isFinite(value)) return;
 
-  state.currentPrice = price;
+  storePricePoint({ timestamp, value });
+  prunePriceHistory();
+
+  state.currentPrice = value;
+};
+
+// priceToBeat = chainlink price stamped exactly at round start (what polymarket resolves against)
+const waitForPriceAt = async (timestampMs: number, timeoutMs: number): Promise<number | undefined> => {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const price = priceHistory.get(timestampMs);
+    if (price !== undefined) return price;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return priceHistory.get(timestampMs);
+};
+
+const ensureChainlinkConnected = async (): Promise<void> => {
+  if (chainlinkWsClient.isConnected()) return;
+
+  try {
+    await chainlinkWsClient.connect();
+  } catch (err) {
+    logger.warn(`Chainlink WS connect failed: ${err}`);
+  }
+};
+
+const getPtbdp = (): number => {
+  if (!state.priceToBeat || !state.currentPrice) return 0;
+  const priceToBeatDelta = Math.abs(state.priceToBeat - state.currentPrice);
+  return (priceToBeatDelta / state.priceToBeat) * 100;
 };
 
 const handleBookEvent = async (data: any): Promise<void> => {
@@ -144,6 +190,9 @@ const captureRound = (): void => {
 
 let intervalId: NodeJS.Timeout;
 
+// connect before the first round so the round-start tick is already streaming in
+void ensureChainlinkConnected();
+
 schedule(`*/${ROUND_DURATION} * * * *`, async () => {
   if (intervalId) {
     clearInterval(intervalId);
@@ -165,37 +214,19 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
 
   await clobApiClient.getPolymarketClient();
 
-  // priceToBeat = close of the 1m candle that ends at the round start
   const roundStartMs = new Date(start).getTime();
-  const candleStartMs = roundStartMs - 60_000;
-  const candleStartSec = candleStartMs / 1000;
-  const candleStart = new Date(candleStartMs).toISOString();
 
-  let candle: CoinbaseCandleRaw | undefined;
+  await ensureChainlinkConnected();
 
-  for (let attempt = 0; attempt < 5 && !candle; attempt++) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-    const candles = await coinbaseApiClient.getProductCandles(PRODUCT_ID, candleStart, start);
-    candle = candles.find(([time]) => time === candleStartSec);
-  }
+  const priceToBeat = await waitForPriceAt(roundStartMs, PRICE_TO_BEAT_TIMEOUT_MS);
 
-  if (!candle) {
-    logger.warn(`No previous Coinbase candle found for priceToBeat. product: ${PRODUCT_ID}, start: ${candleStart}, end: ${start}`);
-    return;
-  }
-
-  const [, , , , close] = candle;
-  const priceToBeat = Number(close);
-
-  if (!Number.isFinite(priceToBeat)) {
-    logger.warn(`Invalid previous Coinbase candle close for priceToBeat. candle: ${JSON.stringify(candle)}`);
+  if (priceToBeat === undefined) {
+    logger.warn(`No Chainlink price found for priceToBeat. symbol: ${CHAINLINK_SYMBOL}, timestamp: ${start}`);
     return;
   }
 
   state.testMode = TEST_MODE;
   state.priceToBeat = priceToBeat;
-
-  if (!coinbaseWsClient.isConnected()) await coinbaseWsClient.connect();
 
   const unixStartDate = Math.floor(roundStartMs / 1000);
   const slug = `${SYMBOL}-updown-${ROUND_DURATION}m-${unixStartDate}`;
@@ -246,6 +277,7 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
       lastDownBuyPrice
     } = state;
 
+    const ptbdp = getPtbdp();
     const spent = state.totalSpent;
     const pairCost = state.getPairCost();
     const finishPayout = state.getFinishPayout();
@@ -253,9 +285,7 @@ schedule(`*/${ROUND_DURATION} * * * *`, async () => {
     if (!upAskPrice) return;
     if (!downAskPrice) return;
 
-    console.log(currentPrice, priceToBeat);
-
-    // logger.info(`${`UP`.padEnd(4, " ")}: ask - ${upAksPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${upQty.toFixed(2)}, avg - ${upAvg.toFixed(2)}, lastBuy - ${lastUpPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
-    // logger.info(`${`DOWN`.padEnd(4, " ")}: ask - ${downAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, qty - ${downQty.toFixed(2)}, avg - ${downAvg.toFixed(2)}, lastBuy - ${lastDownPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
+    logger.info(`${`UP`.padEnd(4, " ")}: ask - ${upAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, ptbdp - ${ptbdp.toFixed(2)}, qty - ${upQty.toFixed(2)}, avg - ${upAvgPrice.toFixed(2)}, lastBuy - ${lastUpBuyPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
+    logger.info(`${`DOWN`.padEnd(4, " ")}: ask - ${downAskPrice.toFixed(2)}, price - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(currentPrice)}, ptb - ${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(priceToBeat)}, ptbdp - ${ptbdp.toFixed(2)}, qty - ${downQty.toFixed(2)}, avg - ${downAvgPrice.toFixed(2)}, lastBuy - ${lastDownBuyPrice.toFixed(2)}, spent - ${spent.toFixed(2)}, pairCost - ${pairCost.toFixed(2)}, finishPayout - ${finishPayout.toFixed(2)}`);
   }, DATA_INTERVAL_MS);
 });
